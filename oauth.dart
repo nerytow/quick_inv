@@ -1,109 +1,104 @@
-// my code for the authentication
-
-
-// might also include the update thing here
-import 'dart:io';
 import 'dart:convert';
 import 'dart:math';
-import 'package:crypto/crypto.dart';
-
-
-import 'package:oauth2/oauth2.dart' as oauth2;
+import 'package:dotenv/dotenv.dart' as dotenv;
+import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
+import 'package:pocketbase/pocketbase.dart';
 
-import 'package:pocketbase/pocketbase.dart'; 
-/* imported necessary packages */
-
-
-// defining important variables (static)
-final TURSO_DATABASE_URL="libsql://quick-inv-horisofine.turso.io";
-
-final TURSO_AUTH_TOKEN="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3MDkxNTY1NzQsImlkIjoiZjQ4MDNjZGQtZDVkOS0xMWVlLWE5ZmMtZmFjNjg0YWUwMTkyIn0.oBb904uk643He_3BiHhRl91BHdcZiTFJpXl9sQmlfR0FqUhOEmqPdCB1q-Lq1oqBL5p3m-nqk4pm7FvU5wvHBg";
-
+// Initialize PocketBase
 final pb = PocketBase('http://127.0.0.1:8090');
+const guildId = '751662000093921291';
 
-final userData = await pb.collection('users').authWithPassword('admin@admin.com', 'admin12345!');
+// Function to get user roles and determine their role
+Future<String> getUserRoles(String accessToken, String guildId) async {
+  try {
+    final response = await http.get(
+      Uri.parse('https://discord.com/api/guilds/$guildId/members/@me'),
+      headers: {
+        'Authorization': 'Bearer $accessToken',
+      },
+    );
 
+    if (response.statusCode == 200) {
+      Map<String, dynamic> data = jsonDecode(response.body);
+      List<dynamic> roles = data['roles'];
+      print('User roles: $roles'); // Print roles for verification
 
-final authorizationEndpoint =
-    Uri.parse('https://discord.com/oauth2/authorize');
-final tokenEndpoint = Uri.parse('https://discord.com/api/oauth2/token	');
-
-
-final identifier = 'quickinv'+randomHexString(5);
-Random _random = Random();
-
-String randomHexString(int length) {
-  StringBuffer sb = StringBuffer();
-  for (var i = 0; i < length; i++) {
-    sb.write(_random.nextInt(16).toRadixString(16));
-  }
-  return sb.toString();
-}
-//generate random passw
-//hash func
-String hash(String orig){
-
-}
-
-final secret = randomHexString(32); 
-
-final redirectUrl = Uri.parse('https://bdquickinv.happyfir.com/');
-try { // if the file doesnt exist
-final credentialsFile = File('~/.myapp/credentials.json');}
-catch (error) {
-    print('Error: $error');
-}
-// access the user Roles w parameters accessToken and guildID it will always be '751662000093921291'
-Future<void> getUserRoles(String accessToken, String guildId) async { 
-  final response = await http.get(
-    Uri.parse('https://discord.com/api/guilds/$guildId/members/@me'),
-    headers: {
-      'Authorization': 'Bearer $accessToken',
-    },
-  );
-
-  if (response.statusCode == 200) {
-    // If the server returns a 200 OK response parse the JSON
-    Map<String, dynamic> data = jsonDecode(response.body); 
-    List<dynamic> roles = data['roles'];
-    print('User roles: $roles'); // print all the roles then we can look for Execs: 751662317569179791 lab supervisor : 1044742711162449920
-  } else {
-    // If the server did not return a 200 OK response throw an exception
-    throw Exception('Failed to load user roles');
+      if (roles.contains('751662317569179791')) {
+        return 'Exec';
+      } else if (roles.contains('1044742711162449920')) {
+        return 'LabSupervisor';
+      } else {
+        return 'Guest';
+      }
+    } else {
+      print('Failed to load user roles, status code: ${response.statusCode}');
+      print('Response: ${response.body}');
+      return 'Error';
+    }
+  } catch (e) {
+    print('Error fetching user roles: $e');
+    return 'Error';
   }
 }
 
-Future<oauth2.Client> createClient() async {
-  var exists = await credentialsFile.exists(); // checks if the credential files exists
+// Function to authenticate with PocketBase using OAuth2
+Future<String> authenticateWithPocketBase() async {
+  try {
+    final authData = await pb.collection('users').authWithOAuth2('discord', (url) async {
+      if (await canLaunch(url.toString())) {
+        await launch(url.toString());
+      } else {
+        throw 'Could not launch $url';
+      }
+    });
 
-   if (exists) { // it exsists already
-    var credentials = 
-        oauth2.Credentials.fromJson(await credentialsFile.readAsString());// make the credentials a string stored into credentials
-    return oauth2.Client(credentials, identifier: identifier, secret: secret); // create client in format : credentials, identifier, secret
+    if (pb.authStore.isValid) {
+      print('Authentication successful');
+      print('Token: ${pb.authStore.token}'); // these to debug
+      print('User ID: ${pb.authStore.model.id}');
+
+      await pb.collection('users').update(pb.authStore.model.id, body: {
+        "oauth_token": pb.authStore.token,
+      });
+
+      return await getUserRoles(pb.authStore.token, guildId);
+    } else {
+      print('Authentication failed');
+      return 'Error';
+    }
+  } catch (e) {
+    print('Error during authentication: $e');
+    return 'Error';
   }
-
-  var grant = oauth2.AuthorizationCodeGrant(
-      identifier, authorizationEndpoint, tokenEndpoint,
-      secret: secret);  
-      
-      var authorizationUrl = grant.getAuthorizationUrl(redirectUrl);
-      await redirect(authorizationUrl);
-  var responseUrl = await listen(redirectUrl);
-   return await grant.handleAuthorizationResponse(responseUrl.queryParameters);
 }
 
 void main() async {
-  var client = await createClient();
+  dotenv.load();
+  final tursoDatabaseUrl = dotenv.env['TURSO_DATABASE_URL'];
+  final tursoAuthToken = dotenv.env['TURSO_AUTH_TOKEN'];
+
+
+  if (tursoDatabaseUrl == null || tursoAuthToken == null) {
+    print('Turso database URL, auth token, client ID or client secret is not set in the .env file.');
+    return;
+  }
+
+  pb.baseUrl = tursoDatabaseUrl;
+  pb.authStore.save(tursoAuthToken, 'admin'); 
+
   try {
-        var rolesResponse = await client.get(Uri.parse('https://discord.com/api/guilds/$guildId/members/@me'),
-                headers: {'Authorization': 'Bearer ${client.credentials.accessToken}'});
-        print('User roles in guild $guildId: $rolesResponse'); // guilds ID os 751662000093921291
-  print(await client.read('http://bdquickinv.happyfir.com/protected-resources.txt'));}
-  catch (error) {print('Error: $error');}
-
-  
-
- await credentialsFile.writeAsString(client.credentials.toJson());
+    String result = await authenticateWithPocketBase();
+    if (result == 'Exec') {
+      print('User is an Exec.');
+    } else if (result == 'LabSupervisor') {
+      print('User is a Lab Supervisor.');
+    } else if (result == 'Guest') {
+      print('User is a Guest.');
+    } else {
+      print('Error user role.');
+    }
+  } catch (error) {
+    print('Error: $error');
+  }
 }
-
